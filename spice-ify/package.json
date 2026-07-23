@@ -1,0 +1,11 @@
+{
+  "name": "spice-ify",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Spicetify extension: highest-capability Spotify tier, and the only one that needs no owner Premium.",
+  "scripts": {
+    "build": "bun build src/spice-ify.ts --outfile dist/spice-ify.js",
+    "install-ext": "bun run build && mkdir -p ~/.spicetify/Extensions && cp dist/spice-ify.js ~/.spicetify/Extensions/ && echo 'now run: spicetify config extensions spice-ify.js && spicetify apply'"
+  }
+}

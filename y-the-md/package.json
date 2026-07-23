@@ -1,0 +1,23 @@
+{
+  "name": "y-the-md",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "YouTube Music client for the bridge. Three hooks behind one capability router.",
+  "engines": {
+    "bun": ">=1.3"
+  },
+  "scripts": {
+    "status": "bun run src/main.ts --status",
+    "now": "bun run src/main.ts --now",
+    "queue": "bun run src/main.ts --queue",
+    "sync": "bun run src/main.ts --sync"
+  },
+  "dependencies": {
+    "peerjs": "^1.5.4",
+    "node-datachannel": "^0.27.0"
+  },
+  "trustedDependencies": [
+    "node-datachannel"
+  ]
+}

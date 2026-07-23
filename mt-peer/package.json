@@ -1,0 +1,21 @@
+{
+  "name": "mt-peer",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Joins a pear-desktop Music Together session as a guest peer. Not a server.",
+  "engines": {
+    "bun": ">=1.3"
+  },
+  "scripts": {
+    "join": "bun run src/main.ts",
+    "probe": "bun run src/main.ts --probe"
+  },
+  "dependencies": {
+    "peerjs": "^1.5.4",
+    "node-datachannel": "^0.27.0"
+  },
+  "trustedDependencies": [
+    "node-datachannel"
+  ]
+}
