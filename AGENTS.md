@@ -7,19 +7,34 @@ Instructions for Claude working in this repo. Read this before changing code.
 A bridge that keeps a **YouTube Music "Music Together" session** and a **Spotify Jam**
 playing the same thing at roughly the same time.
 
-### Deployables — four, of which one is optional
+### Deployables — three
 
-**An adapter is not a build.** Most ways of reaching a player are modules inside the agent,
-not separate programs. Counting adapters as deployables is how this turns into five or six
-projects that don't need to exist.
+**A hook is not a build.** Ways of reaching a player are modules inside a client, not
+separate programs. Counting hooks as deployables is how this turns into five or six projects
+that don't need to exist.
 
-| # | Build | Language | Required? | Role |
-|---|---|---|---|---|
-| 1 | `matcha/` | Python + Flask | **core** ✅ built | Song matching service. Stateless, cached, `/api/v1`. |
-| 2 | `y-the-md/` | TypeScript + Bun | **core** 🚧 partial | YouTube Music client. Three hooks behind one capability router. |
-| 3 | `relay/` | Python + Flask | **core** | Session state + fan-out between clients. **Not yet built.** |
-| 4 | `agent/` | Python | **core** | Per-Spotify-participant. Local player control + relay link. **Not yet built.** |
-| 5 | `spicetify-ext/` | TypeScript | optional | Raises the Spotify tier for those running Spicetify. Feeds the local agent. |
+| # | Build | Language | Role |
+|---|---|---|---|
+| 1 | `matcha/` | Python + Flask | **The central hub.** Song matching, plus the relay (live session state, per-client work queues) and the sync engine that decides what every client does. **Stateful:** session state in memory, matches cached in SQLite. Everything under `/api/v1`. |
+| 2 | `y-the-md/` | TypeScript + Bun | **The YouTube Music client**, on the host's machine. Hooks into pear-desktop (api-server, Music Together) behind one capability router; reports to matcha and runs its commands. |
+| 3 | `spice-ify/` | TypeScript, Spicetify extension | **The Spotify client**, one per Spotify listener, inside their Spotify desktop. Reports state, runs commands and catalogue searches, forwards queue adds; talks only to matcha. |
+
+Built with `python3 scripts/build.py` into `dist/`: two self-contained executables plus one JS
+file (see README.md).
+
+**Session state lives in the host and in matcha.** The host's YouTube Music now-playing and
+queue *are* the session; matcha holds who is connected and the work in flight. YouTube Music
+listeners join the host through Listen Together (Music Together) and need nothing from
+matcha. Every Spotify listener needs matcha.
+
+The original plan had two more builds, a `relay/` and a per-Spotify-listener `agent/`, with
+the Spicetify extension as an optional booster *feeding* that agent. Both were folded in, so
+don't recreate them:
+
+- **The relay is part of matcha**: `relay.py`, `engine.py` and `runner.py`, plus the
+  `/spotify/*`, `/ytm/*`, `/queue/*` and `/sync` routes.
+- **spice-ify does the agent's job itself**, namely local player control and the link to the
+  hub, because it already runs inside Spotify.
 
 `mt-peer/` is not a deployable — it is the protocol spike and live-probe CLI
 (`--pause`, `--seek`, `--next`, `--queue-probe`). Keep it for testing against a real
@@ -27,13 +42,14 @@ session; the production Music Together code lives in `y-the-md/src/mt/`.
 
 The topology is **asymmetric, and that is correct**: Music Together is already a shared
 session we can join once, whereas Spotify Jam is closed to us, so Spotify needs presence on
-each participant's machine. Don't try to force symmetry.
+each participant's machine (spice-ify). Don't try to force symmetry.
 
 ### Capability routing (both clients)
 
 Clients never name a hook directly — they ask for a **capability** and a router picks the
-endpoint. Implemented in `y-the-md/src/{capabilities,router,config}.ts`; the Spotify agent
-must follow the same shape.
+endpoint. Implemented in `y-the-md/src/{capabilities,router,config}.ts`. spice-ify has a
+single hook today (Spicetify), so it has no router yet; a second Spotify hook must follow the
+same shape.
 
 - **Where a capability is genuinely redundant, any provider may be chosen explicitly.**
 - **Where one provider is better, it is the default preference** — with a documented reason.
@@ -47,14 +63,15 @@ Two rules the router enforces, both deliberate:
 2. **A pinned capability does not fall back.** Defaults fall back freely (that is the point
    of three hooks); an explicit pin fails loudly instead of quietly using something else.
 
-Inside build 4 (the Spotify agent), these are **adapters — modules, not programs**:
+The hooks are **modules inside a client, not programs**:
 
-| Adapter | Platform | Needs |
-|---|---|---|
-| `mpris` | either | nothing — D-Bus, local. **Transport only** (constraint 10) |
-| `spotify-web-api` | Spotify | client ID + OAuth + Premium |
-| `spicetify-ipc` | Spotify | Spicetify + our extension *(optional)* |
-| `pear-api-server` | YT Music | pear-desktop, api-server plugin on. Local only, but the **only** source of track *metadata* and upcoming tracks — see constraint 9 |
+| Hook | Platform | Lives in | Needs | Status |
+|---|---|---|---|---|
+| `pear-api-server` | YT Music | y-the-md | pear-desktop, api-server plugin on. Local only, but the **only** source of track *metadata* and upcoming tracks — see constraint 9 | built; default for queue and metadata |
+| `music-together` | YT Music | y-the-md | the host's peer id | built; the only hook that reaches other listeners |
+| `mpris` | either | y-the-md (listed) | nothing — D-Bus, local. **Transport only** (constraint 10) | not wired yet |
+| `spicetify` | Spotify | spice-ify | Spicetify + our extension | built; **today the only Spotify client** |
+| `spotify-web-api` | Spotify | matcha `providers/spotify.py` | client ID + owner Premium (+ OAuth + per-user Premium for player control) | catalogue search only |
 
 **Spotify must always be fully usable without Spicetify.** `mpris` + `spotify-web-api`
 together are the native route and they are the *default*: MPRIS supplies transport and seek,
@@ -63,8 +80,14 @@ requirement — no feature may be built such that it only works when Spicetify i
 participant running plain Spotify and one running Spicetify must both work in the same
 session, and the difference must be capability, never participation.
 
-The agent probes what's actually present on its machine, selects adapters accordingly, and
-reports the resulting capability set to the server.
+> **Status (2026-10-29): not met.** spice-ify is the only Spotify client; the MPRIS + Web
+> API route was planned for the per-listener `agent/` and never built, so a Spotify listener
+> without Spicetify cannot take part yet. Whether this rule stays a goal or is dropped is
+> **an open decision for the user** — ask before building either way.
+
+Each client probes what's actually present on its machine, selects hooks accordingly, and
+reports the resulting capability set to matcha. (y-the-md does; spice-ify does not report
+capabilities yet, so matcha assumes the Spotify platform default.)
 
 Externally required, not built by us: **pear-desktop** with the Music Together plugin
 (that's the session `mt-peer` joins). The api-server plugin is optional — see
@@ -374,15 +397,19 @@ with relative imports (`from . import service`), run as `python -m matcha.main`.
 
 ## Authorization
 
-The matcha is an internal service with **one caller** (the bridge). It holds no user data and
-no OAuth tokens — platform credentials live in the bridge only.
+matcha's callers are the clients: y-the-md and every spice-ify, possibly on other machines.
+They all share **one optional bearer token**. matcha holds live session state (who is
+connected, what each plays, work in flight) but no user accounts and no per-user platform
+tokens — a listener's own Spotify login stays inside their Spotify client.
 
 - Default: bind `127.0.0.1`, no auth.
-- Remote hosting: set `MATCHER_TOKEN`; requests then need `Authorization: Bearer <token>`.
-  Compared with `hmac.compare_digest`. When the env var is unset the guard is a no-op.
+- Remote hosting (Spotify listeners on other machines): set `MATCHA_TOKEN` (`MATCHER_TOKEN`
+  still accepted); requests then need `Authorization: Bearer <token>`. Compared with
+  `hmac.compare_digest`. When the env var is unset the guard is a no-op. `/api/v1/health`
+  stays open as a liveness probe.
 
-Do not add user accounts, JWTs, sessions, or OAuth to the matcha. If a feature seems to need
-them, that feature belongs in the bridge.
+Do not add user accounts, JWTs, per-user sessions, or OAuth to matcha. If a feature seems to
+need them, it belongs in a client.
 
 ## Matching rules
 
@@ -407,7 +434,9 @@ them, that feature belongs in the bridge.
 - Adding a dependency that apt doesn't carry needs a real justification, because it costs the
   user a manual step.
 - Standard library first. Current third-party deps: `flask`, `rapidfuzz`, `spotipy`,
-  `ytmusicapi`. Adding another needs a reason.
+  `ytmusicapi`. Adding another needs a reason. Build-only: `python3-pyinstaller`, which
+  `scripts/build.py` runs with `python3 -S` against Debian's packages and `vendor/` only, so
+  nothing pip-installed under `/usr/local` or `~/.local` can leak into `dist/matcha`.
 - `matcha/requirements.txt` records version floors for reference only. It is not the install
   path on this machine; `DEPENDENCIES.md` is.
 - Type hints on anything crossing a layer boundary.
@@ -418,6 +447,7 @@ them, that feature belongs in the bridge.
 ## Testing
 
 - `python3 -m pytest tests/ -q` from the repo root, using system python.
+- `cd y-the-md && bun test` for y-the-md (Bun's built-in runner; no extra packages).
 - `logic.py` gets real unit tests — it's pure, it's the part that's actually subtle, and it
   needs no mocks.
 - Don't write tests that require live Spotify/YTM credentials.

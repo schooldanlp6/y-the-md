@@ -18,6 +18,7 @@ export type NowPlaying = {
 };
 
 export type QueueItem = {
+  /** Empty for an entry the endpoint could not parse; kept so indexes stay aligned. */
   videoId: string;
   title?: string;
   artist?: string;
@@ -51,6 +52,13 @@ export type Endpoint = {
   queue?(): Promise<QueueSnapshot | undefined>;
   /** `position` is where the track goes; 'next' means straight after current. */
   enqueue?(videoId: string, position: 'next' | 'end'): Promise<void>;
+  /**
+   * Insert at an exact queue index (as numbered by this endpoint's `queue()`).
+   * True once the track is confirmed in the queue; false if the write was sent
+   * but not seen to land -- it may still, so check before writing it again.
+   * Throws only when nothing can have been written.
+   */
+  insertAt?(videoId: string, index: number): Promise<boolean>;
   dequeue?(index: number): Promise<void>;
   moveInQueue?(fromIndex: number, toIndex: number): Promise<void>;
   setIndex?(index: number): Promise<void>;
@@ -65,6 +73,6 @@ export const CAPABILITY_METHODS: Record<Capability, readonly (keyof Endpoint)[]>
   position: ['nowPlaying'],
   metadata: ['nowPlaying'],
   queueRead: ['queue'],
-  queueWrite: ['enqueue', 'dequeue', 'moveInQueue', 'setIndex', 'playTrack'],
+  queueWrite: ['enqueue', 'insertAt', 'dequeue', 'moveInQueue', 'setIndex', 'playTrack'],
   reach: [],
 };

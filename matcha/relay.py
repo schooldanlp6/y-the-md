@@ -17,6 +17,8 @@ from __future__ import annotations
 import threading
 import time
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field, asdict
 
 # A client that has not polled in this long is considered gone.
@@ -24,6 +26,11 @@ CLIENT_TIMEOUT_SECONDS = 30
 
 # Requests older than this are abandoned rather than left to accumulate.
 REQUEST_TTL_SECONDS = 30
+
+# A confirmed queue add of the same track within this window is a duplicate --
+# typically several listeners in one Spotify Jam all seeing the same queued
+# track and each forwarding it.
+QUEUE_ADD_DEDUPE_SECONDS = 60
 
 
 @dataclass
@@ -59,6 +66,8 @@ class Request:
     #: Optional specific client. Advisory: see take_pending for why a request is
     #: not stranded when the named client cannot claim it.
     target: str | None = None
+    #: Unclaimed work for the same target and key is replaced, not stacked.
+    collapse_key: str | None = None
     created_at: float = field(default_factory=time.time)
 
     @property
@@ -79,6 +88,10 @@ class Relay:
         self._pending: dict[str, Request] = {}
         self._results: dict[str, dict] = {}
         self._events: dict[str, threading.Event] = {}
+        #: track key -> [lock, number of callers holding or waiting on it]
+        self._queue_add_locks: dict[str, list] = {}
+        #: track key -> (confirmed_at, result) for recent successful queue adds
+        self._queue_adds: dict[str, tuple[float, dict]] = {}
 
     # --- client state -----------------------------------------------------
 
@@ -118,21 +131,36 @@ class Relay:
         payload: dict,
         target: str | None = None,
         platform: str | None = None,
+        collapse_key: str | None = None,
     ) -> str:
         """Add work for a client to pick up. Returns the request id.
 
         `platform` is the real constraint -- it decides who *may* serve the work.
         `target` is a preference for a specific client, used by commands that
         must reach one particular player.
+
+        `collapse_key` makes this supersede unclaimed work for the same target
+        with the same key, keeping its place in line. The engine re-decides
+        every second; while a client is busy (a queue insert can take seconds)
+        those decisions would otherwise stack up and all run back to back, each
+        playTrack inserting yet another copy of the track.
         """
-        request = Request(
-            id=str(uuid.uuid4()),
-            kind=kind,
-            payload=payload,
-            platform=platform,
-            target=target,
-        )
         with self._lock:
+            if collapse_key is not None:
+                for queued in self._pending.values():
+                    if queued.target == target and queued.collapse_key == collapse_key:
+                        queued.payload = payload
+                        queued.created_at = time.time()
+                        return queued.id
+
+            request = Request(
+                id=str(uuid.uuid4()),
+                kind=kind,
+                payload=payload,
+                platform=platform,
+                target=target,
+                collapse_key=collapse_key,
+            )
             self._pending[request.id] = request
             self._events[request.id] = threading.Event()
         return request.id
@@ -196,6 +224,41 @@ class Relay:
         with self._lock:
             self._events.pop(request_id, None)
             return self._results.pop(request_id, None)
+
+    # --- queue-add de-duplication -------------------------------------------
+
+    @contextmanager
+    def queue_add_guard(self, key: str) -> Iterator[None]:
+        """Serialises adds of one track, so a duplicate sees the first's result.
+
+        Reference-counted: the lock is dropped only once nobody holds or waits
+        on it. Pruning merely-unlocked locks instead would race a caller that
+        has fetched the lock but not yet acquired it, giving one track two locks.
+        """
+        with self._lock:
+            entry = self._queue_add_locks.setdefault(key, [threading.Lock(), 0])
+            entry[1] += 1
+        try:
+            with entry[0]:
+                yield
+        finally:
+            with self._lock:
+                entry[1] -= 1
+                if entry[1] == 0 and self._queue_add_locks.get(key) is entry:
+                    del self._queue_add_locks[key]
+
+    def recent_queue_add(self, key: str) -> dict | None:
+        """The result of a confirmed add of this track inside the dedupe window."""
+        with self._lock:
+            now = time.time()
+            for k in [k for k, (at, _) in self._queue_adds.items() if now - at > QUEUE_ADD_DEDUPE_SECONDS]:
+                del self._queue_adds[k]
+            entry = self._queue_adds.get(key)
+            return entry[1] if entry else None
+
+    def remember_queue_add(self, key: str, result: dict) -> None:
+        with self._lock:
+            self._queue_adds[key] = (time.time(), result)
 
     def _drop_expired_locked(self) -> None:
         for rid in [r.id for r in self._pending.values() if r.expired]:

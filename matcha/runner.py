@@ -26,6 +26,21 @@ TICK_SECONDS = 1.0
 FAILURE_BACKOFF_START = 15.0
 FAILURE_BACKOFF_MAX = 300.0
 
+#: A playTrack is not re-sent to a client for the same track within this window.
+#: Landing one takes the client a few seconds (insert, wait for it, skip), and
+#: the engine re-decides every second -- unchecked, each repeat inserted another
+#: copy of the track and restarted it.
+TRACK_COMMAND_COOLDOWN_SECONDS = 10.0
+
+#: Which unclaimed commands supersede each other (see Relay.enqueue). Play and
+#: pause share a slot: only the latest of the two matters.
+COLLAPSE_KEYS = {
+    "play": "transport",
+    "pause": "transport",
+    "seek": "seek",
+    "playTrack": "playTrack",
+}
+
 #: What each platform can be told to do. Clients may narrow this by reporting
 #: their own capabilities; they can never widen it.
 PLATFORM_CAPABILITIES = {
@@ -82,6 +97,13 @@ class SyncEngineRunner:
         #: real user action, not on an echo of a command we sent, so the most
         #: recently *user*-changed client is the play/pause authority.
         self._pause: dict[str, tuple[bool, float]] = {}
+        #: The client currently leading. Kept until it goes stale -- see
+        #: `_pick_leader`.
+        self._leader_id: str | None = None
+        #: (leader track id, when we first saw it) -- see `_ready_followers`.
+        self._leader_track: tuple[str | None, float] = (None, 0.0)
+        #: client_id -> (track value, sent_at) of the last playTrack sent.
+        self._track_commands: dict[str, tuple[object, float]] = {}
 
     # --- mapping ----------------------------------------------------------
 
@@ -99,6 +121,12 @@ class SyncEngineRunner:
         """
         if not leader.track_id:
             return None
+
+        # A follower on the leader's own platform plays the very same id. This
+        # is not a match at all -- and matcha rejects same-platform matches, so
+        # sending it there would fail, back off, and never sync that follower.
+        if target_platform == leader.platform:
+            return leader.track_id
 
         key = (leader.track_id, target_platform)
         if key in self._mapping_cache:
@@ -180,6 +208,79 @@ class SyncEngineRunner:
             return None
         return max(self._pause.items(), key=lambda kv: kv[1][1])[0]
 
+    # --- leadership -------------------------------------------------------
+
+    def _pick_leader(self, clients: list[ClientState]) -> ClientState | None:
+        """The leading client among `clients`, or None if none can lead.
+
+        **Sticky.** Every client reports at ~1 Hz, so "most recently updated"
+        alone would hand leadership back and forth between two clients on the
+        leader platform every tick, each flip dragging every follower to the
+        other one's track. The current leader keeps the role for as long as it
+        stays live; only then does the freshest candidate take over.
+        """
+        candidates = [c for c in clients if c.platform == self.leader_platform]
+        if not candidates:
+            self._leader_id = None
+            return None
+        # Stickiness ends where the engine stops trusting a state; holding a
+        # silent leader past that would stall sync with a live one waiting.
+        now = time.time()
+        current = next(
+            (c for c in candidates if c.client_id == self._leader_id and not c.stale(now)),
+            None,
+        )
+        leader = current or max(candidates, key=lambda c: c.updated_at)
+        self._leader_id = leader.client_id
+        return leader
+
+    def leader(self) -> ClientState | None:
+        """The current leader, for callers outside the tick (e.g. queue adds)."""
+        clients = [_to_client_state(cid, s) for cid, s in relay.relay.live_states().items()]
+        return self._pick_leader(clients)
+
+    def _ready_followers(
+        self, leader: ClientState, followers: list[ClientState]
+    ) -> list[ClientState]:
+        """Followers that have reported since the leader's last track change.
+
+        One that has not cannot have followed yet, so judging it now reads its
+        pre-change report as "wrong track". For a follower in the leader's own
+        session -- which changes track by itself -- that meant a needless
+        playTrack: the song re-inserted and restarted. Costs at most one
+        report interval (~1s) on a genuine change.
+        """
+        if leader.track_id != self._leader_track[0]:
+            self._leader_track = (leader.track_id, leader.updated_at)
+        changed_at = self._leader_track[1]
+        return [f for f in followers if f.updated_at >= changed_at]
+
+    def _hold_repeated_track_changes(
+        self, actions: list[engine.Action], now: float
+    ) -> list[engine.Action]:
+        """Drop a playTrack already sent to that client within the cooldown.
+
+        Its alignment seek goes with it: on its own it would seek the track the
+        follower is still playing, which is the wrong one.
+        """
+        out: list[engine.Action] = []
+        held: set[str] = set()
+        for action in actions:
+            if action.kind == "playTrack":
+                last = self._track_commands.get(action.client_id)
+                if (
+                    last is not None
+                    and last[0] == action.value
+                    and now - last[1] < TRACK_COMMAND_COOLDOWN_SECONDS
+                ):
+                    held.add(action.client_id)
+                    continue
+                self._track_commands[action.client_id] = (action.value, now)
+            elif action.client_id in held:
+                continue
+            out.append(action)
+        return out
+
     # --- tick -------------------------------------------------------------
 
     def tick(self) -> list[engine.Action]:
@@ -189,12 +290,10 @@ class SyncEngineRunner:
             return []
 
         clients = [_to_client_state(cid, s) for cid, s in states.items()]
-        leaders = [c for c in clients if c.platform == self.leader_platform]
-        if not leaders:
+        leader = self._pick_leader(clients)
+        if leader is None:
             return []
 
-        # Most recently updated wins if several clients share the leader platform.
-        leader = max(leaders, key=lambda c: c.updated_at)
         followers = [c for c in clients if c.client_id != leader.client_id]
         if not followers:
             return []
@@ -206,7 +305,10 @@ class SyncEngineRunner:
 
         now = time.time()
         # Track identity + position: leader-driven.
-        actions = engine.plan(leader, followers, mapping, _sync_config(), now)
+        actions = engine.plan(
+            leader, self._ready_followers(leader, followers), mapping, _sync_config(), now
+        )
+        actions = self._hold_repeated_track_changes(actions, now)
         # Play/pause: last-writer-wins across every client, either direction.
         authority = self._transport_authority(clients, now)
         actions += engine.transport_plan(clients, authority)
@@ -220,6 +322,7 @@ class SyncEngineRunner:
                 {"action": action.kind, "value": action.value},
                 target=action.client_id,
                 platform=target_state.platform if target_state else None,
+                collapse_key=COLLAPSE_KEYS.get(action.kind),
             )
 
         self.last_actions = [

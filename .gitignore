@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# JS / Bun
+node_modules/
+bun.lockb
+
+# No virtualenvs in this project (see AGENTS.md) - ignored to catch accidents.
+.venv/
+venv/
+
+# Build output - regenerable with scripts/build.py
+dist/
+build/
+
+# Match cache - regenerable, machine-local
+*.db
+matcha/matches.db
+
+# Secrets
+.env
+
+# Vendored fallback for packages apt does not carry (see vendor/README.md).
+# Contents are machine-local and re-fetchable; the README explaining the
+# directory is the only tracked thing in it.
+vendor/*
+!vendor/README.md
+
+# The Flask template, vendored for reference with its own nested .git
+temp/

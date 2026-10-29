@@ -1,11 +1,11 @@
 /**
  * Client for the matcha song-matching service.
  *
- * matcha is stateless and cached, so calling it per track change is cheap --
- * a repeat is a SQLite hit, not a network round trip to a music platform.
+ * Matches are cached, so calling it per track change is cheap -- a repeat is a
+ * SQLite hit, not a network round trip to a music platform.
  *
- * Auth is a single optional bearer token (matcha has exactly one caller class
- * and stores no user data; see AGENTS.md -> Authorization).
+ * Auth is a single optional bearer token shared by all clients (matcha holds
+ * no user accounts; see AGENTS.md -> Authorization).
  */
 
 export type MatchaTrack = {

@@ -96,7 +96,9 @@ async function showQueue(): Promise<void> {
   console.log(`${q.items.length} tracks, autoplay=${q.autoPlaying}`);
   q.items.forEach((it, i) => {
     if (i < 5 || Math.abs(i - (q.currentIndex ?? 0)) < 3 || i >= q.items.length - 2) {
-      console.log(`  ${String(i).padStart(3)}${it.current ? '*' : ' '} ${it.title ?? it.videoId}`);
+      console.log(
+        `  ${String(i).padStart(3)}${it.current ? '*' : ' '} ${it.title ?? (it.videoId || '(unreadable entry)')}`,
+      );
     }
   });
 }
@@ -154,7 +156,8 @@ async function matchQueue(): Promise<void> {
   if (!q) return console.log('no queue');
 
   const start = q.currentIndex ?? 0;
-  const upcoming = q.items.slice(start + 1, start + 6);
+  // Unreadable entries keep their slot in the snapshot but cannot be matched.
+  const upcoming = q.items.slice(start + 1).filter((it) => it.videoId).slice(0, 5);
   if (!upcoming.length) return console.log('nothing upcoming');
 
   console.log(`pre-matching ${upcoming.length} upcoming tracks…\n`);
@@ -244,10 +247,41 @@ const CONTROL_ACTIONS = new Set([
   '--play-track', '--enqueue', '--set-index',
 ]);
 
+const program = import.meta.path.startsWith('/$bunfs/')
+  ? (process.execPath.split(/[\\/]/).pop() ?? process.execPath)
+  : 'bun run src/main.ts';
+
+function usage(): string {
+  return (
+    'usage:\n' +
+      `  ${program} --status       endpoint availability + capability routing\n` +
+      `  ${program} --now          current track\n` +
+      `  ${program} --queue        upcoming tracks\n` +
+      `  ${program} --match        resolve current track onto Spotify\n` +
+      `  ${program} --match-queue  pre-match the next 5 tracks\n` +
+      `  ${program} --sync         run as a sync client (state + commands)\n` +
+      '\nmanual control (routed to the best available hook):\n' +
+      '  --play | --pause | --skip | --back\n' +
+      '  --seek <seconds>        --play-track <videoId>\n' +
+      '  --enqueue <videoId>     --set-index <n>\n\n' +
+      'Music Together: set YTMD_MT_HOST_ID=<host-peer-id> to join a session, or\n' +
+      '                YTMD_MT_HOST_ID=clipboard to read the id pear-desktop copied.\n' +
+      '                Joining lets commands reach other listeners, not just this machine.\n' +
+      '                There is no autojoin: the id is per-session and never persisted.\n\n' +
+      'overrides:  YTMD_PREFER_<CAPABILITY>=endpoint[,endpoint]   YTMD_DISABLE=endpoint\n' +
+      'matcha:     MATCHA_URL (default http://127.0.0.1:8080)     MATCHA_TOKEN'
+  );
+}
+
 const mode = process.argv[2];
 
 try {
-  if (CONTROL_ACTIONS.has(mode)) await control(mode, process.argv[3]);
+  if (mode === 'help' || mode === '--help' || mode === '-h') console.log(usage());
+  else if (!mode) {
+    console.log(usage());
+    process.exitCode = 1;
+  }
+  else if (CONTROL_ACTIONS.has(mode)) await control(mode, process.argv[3]);
   else if (mode === '--sync') await syncDaemon();
   else if (mode === '--status') await status();
   else if (mode === '--now') await now();
@@ -255,25 +289,8 @@ try {
   else if (mode === '--match') await match();
   else if (mode === '--match-queue') await matchQueue();
   else {
-    console.error(
-      'usage:\n' +
-        '  bun run src/main.ts --status   endpoint availability + capability routing\n' +
-        '  bun run src/main.ts --now      current track\n' +
-        '  bun run src/main.ts --queue        upcoming tracks\n' +
-        '  bun run src/main.ts --match        resolve current track onto Spotify\n' +
-        '  bun run src/main.ts --match-queue  pre-match the next 5 tracks\n' +
-        '  bun run src/main.ts --sync         run as a sync client (state + commands)\n' +
-        '\nmanual control (routed to the best available hook):\n' +
-        '  --play | --pause | --skip | --back\n' +
-        '  --seek <seconds>        --play-track <videoId>\n' +
-        '  --enqueue <videoId>     --set-index <n>\n\n' +
-        'Music Together: YTMD_MT_HOST_ID=<host-peer-id> to join a session, or\n' +
-        '                YTMD_MT_HOST_ID=clipboard to read the id pear-desktop copied.\n' +
-        '                There is no autojoin: the id is per-session and never persisted.\n' +
-        'which is what makes commands reach OTHER listeners rather than just this box.\n\n' +
-        'overrides:  YTMD_PREFER_<CAPABILITY>=endpoint[,endpoint]   YTMD_DISABLE=endpoint\n' +
-        'matcha:     MATCHA_URL (default http://127.0.0.1:8080)     MATCHA_TOKEN',
-    );
+    if (mode !== undefined) console.error(`unknown command '${mode}'`);
+    console.error(usage());
     process.exit(1);
   }
 } catch (err) {

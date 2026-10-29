@@ -126,6 +126,19 @@ def complete_ytm_request():
         return jsonify({"error": str(exc)}), 400
 
 
+# --- session queue ---------------------------------------------------------
+
+
+@api.post("/queue/add")
+def queue_add():
+    try:
+        return jsonify(service.queue_add(_json_body()))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except (providers.ProviderError, service.ProviderUnavailable) as exc:
+        return jsonify({"error": str(exc)}), 503
+
+
 # --- sync engine -----------------------------------------------------------
 
 

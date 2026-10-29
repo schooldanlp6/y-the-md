@@ -14,6 +14,7 @@
  */
 import type { Capability } from './capabilities.ts';
 import type { Router } from './router.ts';
+import { SessionQueue } from './session-queue.ts';
 
 export type SyncOptions = {
   matchaUrl: string;
@@ -26,17 +27,25 @@ export type SyncOptions = {
 
 type PendingRequest = { id: string; kind: string; payload: any };
 
+/** How often dropped hooks are retried. Each endpoint backs off on its own. */
+const REFRESH_INTERVAL_MS = 5000;
+
 export class SyncClient {
   private stateTimer?: ReturnType<typeof setInterval>;
   private pollTimer?: ReturnType<typeof setInterval>;
+  private refreshTimer?: ReturnType<typeof setInterval>;
   private reachable = false;
   /** Guards against overlapping ticks when a command outlives its interval. */
   private busy = false;
+  private refreshing = false;
+  private readonly sessionQueue: SessionQueue;
 
   constructor(
     private readonly router: Router,
     private readonly options: SyncOptions,
-  ) {}
+  ) {
+    this.sessionQueue = new SessionQueue(router);
+  }
 
   private log(message: string): void {
     this.options.onLog?.(message);
@@ -130,9 +139,20 @@ export class SyncClient {
       case 'playTrack':
         await this.router.invoke('queueWrite', (e) => e.playTrack!(String(value)));
         return { ok: true };
-      case 'queue':
-        await this.router.invoke('queueWrite', (e) => e.enqueue!(String(value), 'next'));
-        return { ok: true };
+      case 'queue': {
+        // Another participant's add: into the session queue, in arrival order.
+        const key = request.payload?.key;
+        const added = await this.sessionQueue.add(
+          String(value),
+          typeof key === 'string' ? key : undefined,
+        );
+        if (!added.confirmed) {
+          // Sent but not seen to land. Not a refusal: matcha retries, and the
+          // retry checks the queue before writing again.
+          return { ok: false, unconfirmed: true, error: 'insert sent but not yet visible' };
+        }
+        return { ok: true, index: added.index, duplicate: added.duplicate ?? false };
+      }
       default:
         return { ok: false, error: `unknown action '${action}'` };
     }
@@ -177,10 +197,26 @@ export class SyncClient {
     await this.reportState();
     this.stateTimer = setInterval(() => void this.reportState(), stateMs);
     this.pollTimer = setInterval(() => void this.pollCommands(), pollMs);
+    this.refreshTimer = setInterval(() => void this.refreshEndpoints(), REFRESH_INTERVAL_MS);
+  }
+
+  /** Bring back hooks that dropped (see Router.refresh); never overlapping. */
+  private async refreshEndpoints(): Promise<void> {
+    if (this.refreshing) return;
+    this.refreshing = true;
+    try {
+      const before = this.capabilities().join(',');
+      await this.router.refresh();
+      const after = this.capabilities().join(',');
+      if (after !== before) this.log(`capabilities now: ${after || 'none'}`);
+    } finally {
+      this.refreshing = false;
+    }
   }
 
   stop(): void {
     if (this.stateTimer) clearInterval(this.stateTimer);
     if (this.pollTimer) clearInterval(this.pollTimer);
+    if (this.refreshTimer) clearInterval(this.refreshTimer);
   }
 }

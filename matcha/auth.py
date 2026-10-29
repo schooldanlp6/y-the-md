@@ -1,9 +1,11 @@
 """Bearer-token guard.
 
-The matcha has exactly one caller (the bridge) and stores no user data or
+matcha's callers are the clients (y-the-md and every spice-ify), which all
+share one secret; it holds live session state but no user accounts or
 platform credentials, so a single shared secret is the whole model. When
-`MATCHER_TOKEN` is unset the guard does nothing -- the intended default is to
-bind 127.0.0.1 and let the network be the boundary.
+`MATCHA_TOKEN` (or the older `MATCHER_TOKEN`) is unset the guard does nothing
+-- the intended default is to bind 127.0.0.1 and let the network be the
+boundary.
 """
 from __future__ import annotations
 

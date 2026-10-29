@@ -58,6 +58,32 @@ export class Router {
     return new Map(this.availability);
   }
 
+  /**
+   * Reconnect what dropped, then re-probe.
+   *
+   * `invoke` marks an endpoint down on its first failure, and nothing else
+   * ever marks it up again -- so in a long-running client one transient error
+   * (pear-desktop restarting, an expired token) would disable that hook for
+   * good. Long-running callers call this periodically to recover.
+   * `connect()` is a no-op on an endpoint that is already connected.
+   */
+  async refresh(): Promise<void> {
+    for (const [name, endpoint] of this.endpoints) {
+      if (this.config.disabled.has(name)) {
+        this.availability.set(name, false);
+        continue;
+      }
+      let up = false;
+      try {
+        await endpoint.connect?.();
+        up = await endpoint.available();
+      } catch {
+        up = false;
+      }
+      this.availability.set(name, up);
+    }
+  }
+
   /** True if the operator pinned this capability rather than taking the default. */
   private isOverridden(capability: Capability): boolean {
     const configured = this.config.preference[capability];

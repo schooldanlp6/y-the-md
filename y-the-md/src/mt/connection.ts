@@ -101,7 +101,7 @@ export class MusicTogetherGuest {
     const conn = this.peer.connect(hostId, { reliable: true });
     this.conn = conn;
 
-    await this.waitForConnOpen(conn, timeoutMs);
+    await this.waitForConnOpen(conn, this.peer, timeoutMs);
 
     conn.on('data', (data) => this.dispatch(data));
     conn.on('close', () => this.options.onClose?.('peer closed the connection'));
@@ -169,7 +169,7 @@ export class MusicTogetherGuest {
     });
   }
 
-  private waitForConnOpen(conn: DataConnection, timeoutMs: number): Promise<void> {
+  private waitForConnOpen(conn: DataConnection, peer: Peer, timeoutMs: number): Promise<void> {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(
         () =>
@@ -188,6 +188,18 @@ export class MusicTogetherGuest {
       conn.once('error', (err) => {
         clearTimeout(timer);
         reject(toError(err));
+      });
+      // An unknown host id is reported on the *peer*, not the connection, so
+      // without this an expired id sits out the whole timeout in silence.
+      peer.on('error', (err: Error & { type?: string }) => {
+        if (err?.type !== 'peer-unavailable') return;
+        clearTimeout(timer);
+        reject(
+          new Error(
+            `no Music Together host with id ${this.options.hostId} — ` +
+              'the session has ended or the id is from an old session',
+          ),
+        );
       });
     });
   }

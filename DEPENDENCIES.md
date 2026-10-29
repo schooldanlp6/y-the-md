@@ -14,7 +14,9 @@ cd mt-peer && bun install
 
 Two packages: `peerjs` (same client library pear-desktop uses) and `node-datachannel`
 (WebRTC for a non-browser runtime — the project's only native dependency, loaded via
-N-API). TypeScript runs directly under Bun, so there is no build step and no `tsc`.
+N-API). `y-the-md/node_modules` is a symlink to these, so this one install serves y-the-md
+too. TypeScript runs directly under Bun with no `tsc`; the only build step is packaging
+into `dist/` with `python3 scripts/build.py` (see README.md → Build).
 
 Then, in **pear-desktop → Plugins** — checked against your actual `config.json`, so this
 is only what's genuinely left:

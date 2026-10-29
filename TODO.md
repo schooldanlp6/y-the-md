@@ -53,8 +53,9 @@ Ordered by what unblocks what, not by appeal.
       `providers/__init__.py` is now a facade: Web API first (it returns ISRCs), spice-ify
       second, with per-route detail in `/health`.
 - [ ] **Load `spice-ify` into the real Spotify client.** Everything so far used a simulated
-      extension speaking the same protocol. `cd spice-ify && bun run install-ext`, then
-      `spicetify config extensions spice-ify.js && spicetify apply`. Watch for CSP blocking
+      extension speaking the same protocol. Build with `make spice-ify`, copy
+      `dist/yt-music-jam-api.js` into Spicetify's Extensions directory, then run
+      `spicetify config extensions yt-music-jam-api.js && spicetify apply`. Watch for CSP blocking
       `fetch` to `127.0.0.1:8080` — that is the one unproven assumption.
 - [ ] **Spotify without the Web API — the route that dodges the 403.** On a desktop with
       Premium, **MPRIS + Spicetify together need no Web API at all**: MPRIS gives position,
